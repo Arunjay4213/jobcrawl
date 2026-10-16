@@ -1,0 +1,7 @@
+[Unit]
+Description=jobcrawl daily board regen (13:00 UTC, after the Monday feeds discovery)
+[Timer]
+OnCalendar=*-*-* 13:00:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target

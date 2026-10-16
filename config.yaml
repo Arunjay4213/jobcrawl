@@ -1,0 +1,810 @@
+db: jobs.db
+
+# Simplify-style tracker. Every run that surfaces new postings (and every
+# `applied`/`skipped` flip) regenerates this repo's root README.md - the
+# tracker table - and pushes it. Off by default: turn it on in your own
+# repo once the crawl runs on a schedule.
+publish:
+  enabled: false
+  dir: .
+
+# Extra board files merged into `companies` at load time. boards_broad.yaml is
+# auto-derived from the apply URLs of every configured aggregator feed -
+# regenerate it rather than hand-editing; curated entries belong in this file.
+include:
+  - boards_broad.yaml
+  # Written by `jobcrawl feeds --add`. Absent until a candidate clears the
+  # vetting bar, which is the normal state - not an error.
+  - feeds_discovered.yaml
+  # Boards you applied to by hand, mined from a Simplify/Handshake export by
+  # `jobcrawl import-simplify`. Appended to, never regenerated.
+  - boards_applied.yaml
+  # Boards revealed by intern-titled jobs on the `vc_boards:` portfolio
+  # sweeps. Regenerated wholesale by `jobcrawl boards`; entries carry a 4h
+  # clock so a few hundred discovered boards never join the hourly one blind.
+  - boards_vc.yaml
+  # YC companies with intern roles on Work at a Startup, found by the weekly
+  # `boards` sweep of YC's public directory index (filters.yc_sweep).
+  # Regenerated wholesale; entries carry a 6h clock.
+  - boards_yc.yaml
+  # Boards found by reading companies' own websites for their current ATS
+  # (jobcrawl/resolve.py): the fix for companies the lists name but link
+  # to a careers page or a board that died. Regenerated wholesale by
+  # `jobcrawl boards` from resolve_cache.json; cold tier.
+  - boards_resolved.yaml
+  # The cold tier: boards seen only on the listings feeds' inactive history.
+  # Regenerated wholesale by `jobcrawl boards`, and inert until
+  # filters.cold_boards_per_run is non-zero. Listed last so any board that
+  # also reached a hotter tier keeps the hotter definition.
+  - boards_cold.yaml
+
+filters:
+  # Cycles being recruited for. A posting is dropped only when its title
+  # advertises a cycle that is NOT in this list; titles that name no cycle at
+  # all survive to the LLM, which reads the description.
+  #
+  # Graduation is May 2028. Fall 2026 was dropped on 2026-08-26: the semester
+  # starts in days, so a co-op starting this fall is no longer feasible.
+  # Next year's fall stays in play.
+  target_cycles:
+    # Simplify labels the Dec 2026 - Feb 2027 window "Winter 2026" (Microsoft's
+    # Redmond data-science interns, 2026-09-02); a title saying so in Sept 2026
+    # can only mean the coming winter too.
+    - {term: winter, year: 2026}
+    - {term: winter, year: 2027}   # same Jan-Apr window as spring 2027; Figma et al. name it winter
+    - {term: spring, year: 2027}
+    - {term: summer, year: 2027}   # the main cycle
+    - {term: fall,   year: 2027}
+
+  # The candidate's graduation year (May 2028). A title that names class or
+  # graduation years ("Class of 2029", "2027 Graduates") drops in the
+  # prefilter when none of them includes this year; a title naming no class
+  # year is unaffected. Remove the key to turn the gate off.
+  graduation_year: 2028
+
+  us_only: true             # drop non-US postings
+  min_score: 20             # hide only clear misfits; the score mostly ranks
+  # The email digest's own floor. Rows scoring between min_score and this
+  # still go on the tracker pages, just not into the inbox.
+  email_min_score: 45
+
+  # A posting first seen when its posted date is already older than this many
+  # days is recorded as seen but never scored or surfaced. It has been sitting
+  # on the public GitHub lists that long, so it has been applied to already.
+  # Postings with no date are treated as fresh.
+  max_age_days: 14
+
+  # Closure counts consecutive fresh fetches with the posting missing. The
+  # crawler runs every 10 minutes on the VM (was hourly in Actions), so the
+  # old default of 3 misses would close a posting gone for just 30 minutes.
+  # 18 misses keeps the same ~3-hour real-time window as before.
+  close_after_misses: 18
+
+  # A stored role seen again under a genuinely new URL after this many days
+  # is a REPOST - a fresh requisition for the same title (Ambarella re-opened
+  # its whole intern batch that way, 2026-08-27) - and resurfaces with the
+  # new URL and a fresh date instead of staying hash-deduped forever.
+  # 0 disables. See store.resurface_reposts for the exact trigger.
+  repost_after_days: 14
+
+  # At most one digest email per this many minutes; postings found in between
+  # are held and batched into the next one (the tracker still updates every
+  # run). 0 = email immediately on every run that finds something.
+  # A run that crowds its own 12-minute timer is a silent slowdown: the
+  # wrapper takes the lock with `flock -n`, so the next cycle exits instead
+  # of overlapping and the crawl quietly halves its rate. Warn in the digest
+  # at 11 minutes, while there is still a minute of headroom. 0 disables.
+  # 660 on 2026-09-17 with the timer moved 10 -> 12 min: runs hit 9.5 min
+  # (a Workday queue - ~810 Workday boards per run, 336 of them cold boards
+  # promoted onto the every-run clock). Stopgap; the real fix is a budget
+  # for non-curated Workday boards.
+  run_warn_seconds: 660
+  # Scoring failing on EVERY row for this many runs in a row (a revoked API
+  # key: 401 on each batch) emails an alert, repeated every
+  # scoring_alert_hours while it lasts. Failed rows are never stored, so
+  # nothing else would say so - the key died on 2026-09-26 and the crawl
+  # ran silent for two days.
+  # Reasoning effort for the scorer model (low/medium/high). Medium since
+  # 2026-09-28. The daily audit (jobcrawl-audit.timer on the VM, 11:00 UTC)
+  # raises this to high by itself when it finds audit_bump_after or more
+  # high-confidence scorer mistakes in one day's rows, and commits the change.
+  # Reset to medium on 2026-09-29: the bump that morning was triggered by
+  # the audit's own defense-prime rule (gate RTX et al. by name), which
+  # was wrong and is gone; the mistakes it counted were not the scorer's.
+  scorer_effort: high
+  audit_bump_after: 3
+  scoring_alert_after: 2
+  scoring_alert_hours: 6
+  email_batch_minutes: 30
+  # ...except when a pending posting scores at or above this: then the digest
+  # sends immediately, window closed or not. Batching bundles the score-20s;
+  # an 85 must not wait 30 minutes (Annapurna Labs, 2026-08-27). Unset = no
+  # bypass, everything batches.
+  email_urgent_score: 70
+  # ...and likewise for anything from these companies, at ANY score (NULL
+  # list rows included - Meta/Microsoft/Apple only ever arrive as list rows).
+  # Whole-word-prefix match, so "Amazon" also catches "Amazon Web Services".
+  # Big-company postings gate on application order; a 30-minute hold is real
+  # queue position lost.
+  email_urgent_companies:
+    - Amazon
+    - Google
+    - Microsoft
+    - Meta
+    - Apple
+    - Netflix
+    - NVIDIA
+    - OpenAI
+    - Anthropic
+    - Stripe
+    - Databricks
+    - Adobe
+    - Datadog
+    - Airbnb
+    - Waymo
+    - Uber
+    - Palantir
+    - SpaceX
+    - DoorDash
+    - Salesforce
+    - Tesla
+    - TikTok
+    - Jane Street
+    - Hudson River
+    - Citadel
+    - Two Sigma
+    - Jump Trading
+    - Walmart
+    - Ambarella
+    # Prefix match means this also urgent-flags Toyota Research Institute
+    # and any "Toyota Motor ..." variant - intended.
+    - Toyota
+  # The per-minute `watch` (below) never fails its systemd unit; it counts
+  # misses in its state file and emails once per this many in a row (60 =
+  # one alert per hour of outage, not one per tick).
+  watch_alert_after: 60
+
+  # Firecrawl is the only metered source, and at hourly cadence 8 scraped
+  # boards would burn ~5,800 credits a month. Custom career pages do not
+  # change hourly, so they poll on this slower clock while every free API
+  # board stays hourly. Override per board with `every_hours:`.
+  firecrawl_every_hours: 6
+  # Sweep YC's public directory during `boards`: every isHiring company's
+  # Work-at-a-Startup page is checked for intern roles, and matches are
+  # minted into boards_yc.yaml. Free (server-rendered pages), ~1,500 GETs
+  # per weekly sweep. Replaces the paused Work-at-a-Startup firecrawl scrape.
+  yc_sweep: true
+
+  # A board failing this many runs straight is dead, not flaky (the broad list
+  # keeps reintroducing 404 tokens). Drop it to a slow probe instead of an
+  # hourly one, so it still recovers on its own if the token comes back.
+  # 4h, not 24: a probe costs one request, and a day-long gap is what kept
+  # Whatnot's board (an API-disabled 404 the adapter later learned to read)
+  # invisible for a day after the fix shipped (2026-09-01).
+  dead_board_fails: 12
+  dead_board_retry_hours: 4
+  # Dead for days, not hours: ~30 four-hour probes in a row found nothing,
+  # so the board moved ATS, closed, or its token rotted. From then on it gets
+  # one weekly probe and nothing else. The digest names it once, in the week
+  # it crosses the line, then stops - a board gone for good must not be a
+  # permanent fixture of every email (2026-09-05).
+  retire_board_fails: 40
+  retire_board_retry_hours: 168
+  # A platform outage is not board rot. When at least this many boards on one
+  # family (an ATS, or one Workday data center like wd3) fail the same way in
+  # a run AND they are at least half of that family's fetches, their health
+  # streaks freeze and the digest carries one line for the outage instead of
+  # one per board. 2026-09-05: wd3 answered non-JSON for seven hours, which
+  # put 75 lines in the digest and demoted every wd3 board to the slow probe.
+  outage_min_boards: 5
+
+  # The cold tier: boards mined from the listings feeds' INACTIVE history
+  # (boards_cold.yaml) - companies that ran an internship last cycle and have
+  # nothing open now. Thousands of them, so a slow clock is not enough on its
+  # own: on the first run they are all equally overdue. The per-run budget is
+  # what bounds a run, and it picks the least-recently-tried boards, which
+  # staggers the tier permanently after one sweep.
+  #
+  # cold_boards_per_run is the master switch. 0 means the whole cold tier is
+  # skipped, expensive budget included - the safe default, because the crawl
+  # runs unattended every 12 minutes and turning thousands of boards on at
+  # once backfills their entire contents into the digest and the tracker.
+  # Read the cold-tier section of docs.md before raising it.
+  # Raised from the shipped 0 on 2026-08-25: peak posting season, and the
+  # failure modes are all soft. 80 (not 40): conditional GETs are nearly
+  # weightless, and it halves the cheap half's first sweep to ~2h. Set back
+  # to 0 to switch the tier off mid-flight; no cleanup needed.
+  # 120 on 2026-09-11: the tier roughly doubled (universe_feeds and the
+  # website resolver added ~2,000 boards), and 120 keeps the cheap half's
+  # sweep near 4-5h instead of letting it drift past 8.
+  cold_boards_per_run: 120
+  # Workday boards cost ~20 throttled POSTs each instead of one conditional
+  # GET, so they draw from their own much smaller budget. 20/run cycles the
+  # 911 workday cold boards in ~7.6h (~+40s of throttled POSTs per run), so
+  # for workday the budget, not cold_every_hours, is the binding constraint.
+  # 5 was the cautious ship default but left workday cold boards stuck at a
+  # ~30h effective cadence forever. Raise further only while run duration
+  # stays well under the 12-minute timer interval.
+  # 30 on 2026-09-11 with the universe-feed boards (many are Workday
+  # tenants); ~+20s of throttled POSTs per run.
+  cold_workday_per_run: 30
+  # Lowered from 8 on 2026-08-26 to halve worst-case discovery lag on the
+  # cheap half: ~906 conditional-GET boards sweep in ~1.9h at 80/run, so a
+  # 4h clock still binds and the extra fetches are mostly 304s. Workday is
+  # untouched by this knob - its own budget pins it at ~7.6h regardless.
+  # 6 on 2026-09-11: with ~3,500 cold boards the budget binds before the
+  # clock does, so 4 only added skipped-not-due noise.
+  cold_every_hours: 6
+  # A cold board that produces a new posting is promoted to the normal clock
+  # for this long, renewed every time it produces another. Its first crawl
+  # never counts - that is a backfill of everything it holds, not activity.
+  cold_promote_days: 30
+  # The website resolver (jobcrawl/resolve.py, run by `boards`): companies
+  # the lists name but cannot point us at a pollable board for get their
+  # own site read for the ATS it uses today. Each company is checked once
+  # per resolve_recheck_days; resolve_per_run caps the work per regen so
+  # the first sweep of ~1,300 spreads over a few days. Dead boards are
+  # re-resolved on every regen regardless (a 404 on the old token is the
+  # signal that the company moved ATS - Nominal, Lever -> Gem, 2026-09-11).
+  resolve_per_run: 300
+  resolve_recheck_days: 30
+  # Matched against the title only. Keep this list to words that make a role
+  # categorically wrong, never words that merely APPEAR in a good role's
+  # title. `phd` and `hardware` were removed on 2026-07-28: the audit caught
+  # them dropping Virtu's "Quantitative Researcher (Masters/PhD)" at 72 and
+  # Tesla's "AI/ML Modeling Engineer Intern" at 75. Both are also redundant -
+  # score.py's prompt already penalizes PhD-required and wrong-discipline
+  # roles, and it can read context a substring match cannot.
+  # Employers that are a hard no for reasons invisible in their posting
+  # text. Exact company-name match. Advanced Space asks for a US security
+  # clearance in the application form itself (2026-08-25) - nothing fetched
+  # from the board can see that, so the company is excluded outright.
+  exclude_companies:
+    - Advanced Space
+    # User's call, 2026-09-11: no IBM. Its Avature board backfilled 57 intern
+    # rows into one digest the day the universe expansion landed.
+    - IBM
+    # Northwood Space gates every intern role on ITAR US-person status. The
+    # prefilter catches that from the board text, and the board is polled
+    # directly now - but it reached the tracker first as description-less
+    # Simplify list rows, which no text gate can touch (2026-08-30). Listed
+    # here so a future regen dropping the board from boards_broad.yaml cannot
+    # let those list rows back in.
+    - Northwood Space
+    # AcreTrader is a dead lead, not a hard no: their Rippling board 404s and
+    # acretrader.com/careers is gone outright (verified 2026-09-01). With no
+    # live board to curate, this name is what keeps the feeds' inactive
+    # history from resurrecting the dead token every weekly regen - `boards`
+    # folds these names into its exclusion set. Remove if they hire again.
+    - AcreTrader
+  exclude_keywords:
+    - mba
+    - mechanical
+    - electrical
+    - sales
+    # "recruiter" is a role noun; "recruiting" is not listed because Amazon
+    # ends engineering and science internship titles with its team label
+    # ("..., Undergrad Student Science Recruiting") and the word dropped every
+    # one of them (2026-09-15). "Recruiting Coordinator Intern" goes to the
+    # scorer instead, which rejects it for cents.
+    - recruiter
+    - marketing
+    - designer
+    # Non-engineering functions that still carry "Intern"/"Early Career" and so
+    # survive the intern pattern. Cheap to drop here rather than pay to score.
+    - compliance
+    - legal
+    - counsel
+    - accounting
+    # HR goes by "People" now, but the bare word also names product areas:
+    # Tesla's "Software Engineering - People Products" Summer 2027 internship
+    # was dropped by it (found by the 2026-09-28 big-tech audit). Only the
+    # HR phrasings are excluded.
+    - people partner
+    - people operations
+    - people analytics
+    - people team
+    - people experience
+    - people & culture
+    - human resources
+    - product manager
+    - product management
+
+# ---------------------------------------------------------------------------
+# Boards. `token` meaning depends on `ats`:
+#   greenhouse       board token from boards.greenhouse.io/<token>
+#   lever            company slug from jobs.lever.co/<slug>
+#   ashby            slug from jobs.ashbyhq.com/<slug>
+#   smartrecruiters  company id
+#   workable         account slug from apply.workable.com/<slug>
+#   workday          tenant|wd_number|site
+#   firecrawl        full URL of a custom careers page
+#
+# Every token below was verified live against its API on 2026-07-27. Re-run
+# `python -m jobcrawl.cli verify` monthly - boards rot, and a company that
+# switches ATS silently disappears from your feed otherwise.
+# ---------------------------------------------------------------------------
+# VC portfolio job boards. Swept weekly by `jobcrawl boards` for DISCOVERY
+# only - each intern-titled job whose apply URL derives to a pollable ATS
+# board lands in boards_vc.yaml. Never polled by `run`: one sweep is ~19k
+# description-less portfolio jobs, useless as postings but a goldmine of
+# startup boards.
+# `kind:` names the fetcher (default `consider`, the hosted Consider API).
+# a16z replatformed onto its own Next.js app around 2026-08 - same Consider
+# data, different transport - which silently killed its sweep; `kind: a16z`
+# is that transport, and it filters to internships server-side.
+# Boards to poll every minute (systemd `jobcrawl-watch.timer` on the VM) and
+# email the instant an intern title appears, ahead of the 12-minute crawl.
+# Alerts are title-only (intern regex minus seniority markers): no cycle or
+# location gate, because a miss here defeats the purpose and a false alert
+# costs one email. Keep this list to boards whose postings gate on
+# application order and are expected imminently; each entry costs one
+# conditional GET per minute against that ATS. Same entry shape as
+# `companies:`; the board must ALSO be in `companies:` for the crawl to
+# store, score, and track it (the watch only alerts).
+watch:
+  - {name: DoorDash, ats: greenhouse, token: doordashusa}   # summer 2027 SWE intern expected 2026-09-12 (week of)
+
+vc_boards:
+  - {name: a16z,    host: jobs.a16z.com, kind: a16z}
+  - {name: Sequoia, host: jobs.sequoiacap.com}
+  # More Consider-hosted portfolio boards, verified live 2026-09-11.
+  - {name: Kleiner Perkins, host: jobs.kleinerperkins.com}
+  - {name: Bessemer, host: jobs.bvp.com}
+  - {name: Bain Capital Ventures, host: jobs.baincapitalventures.com}
+  - {name: Felicis, host: jobs.felicis.com}
+  - {name: Initialized, host: jobs.initialized.com}
+  - {name: GV, host: jobs.gv.com}
+  - {name: Contrary, host: jobs.contrary.com}
+  - {name: Abstract, host: jobs.abstractvc.com}
+  # Getro-hosted boards (`kind: getro`, sources.getro_jobs): the funds
+  # whose startups the GitHub lists reach last. Lux's board carried
+  # Nominal's Summer 2027 SWE intern (Gem) while no list had it (2026-09-11).
+  - {name: Lux Capital, host: jobs.luxcapital.com, kind: getro}
+  - {name: Khosla Ventures, host: jobs.khoslaventures.com, kind: getro}
+  - {name: General Catalyst, host: jobs.generalcatalyst.com, kind: getro}
+  - {name: Accel, host: jobs.accel.com, kind: getro}
+  - {name: 8VC, host: jobs.8vc.com, kind: getro}
+  - {name: Thrive Capital, host: jobs.thrivecap.com, kind: getro}
+  - {name: Menlo Ventures, host: jobs.menlovc.com, kind: getro}
+  - {name: Craft Ventures, host: jobs.craftventures.com, kind: getro}
+  - {name: Insight Partners, host: jobs.insightpartners.com, kind: getro}
+  - {name: NFX, host: jobs.nfx.com, kind: getro}
+  - {name: Foundation Capital, host: jobs.foundationcapital.com, kind: getro}
+  - {name: DCVC, host: jobs.dcvc.com, kind: getro}
+  - {name: Point Nine, host: jobs.pointnine.com, kind: getro}
+  - {name: Human Capital, host: jobs.human.vc, kind: getro}
+
+# Company-universe feeds: listings.json files whose rows are NOT internships
+# but whose companies run intern programs. Every row counts as history, so
+# these only ever feed the cold tier and the website resolver, never the
+# hot list. The SimplifyJobs New-Grad list alone named ~1,850 boards that
+# were on no tier (2026-09-11).
+universe_feeds:
+  - "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"
+
+companies:
+  # --- HN's monthly "Ask HN: Who is hiring?" thread. The adapter finds the
+  # newest thread itself (token is the posting account, not a story id) and
+  # keeps only comments whose text matches the intern regex - a handful a
+  # month, real descriptions, LLM-scored like any direct board. Comment
+  # permalinks are the rows' stable URL identity.
+  - {name: "HN Who's Hiring", ats: hn, token: whoishiring, every_hours: 6}
+
+  # --- Big tech / semis ---
+  # Intel's broad-list token (intel|1|en-us) 404s; External is the live site.
+  - {name: Intel,            ats: workday,    token: 'intel|1|External'}
+  # IBM runs Avature behind careers.ibm.com; the adapter polls the portal's
+  # intern keyword search. First crawl (2026-08-13) surfaced 16 US rows.
+  # REMOVED 2026-08-28 on user request ("remove ibm for now") after the
+  # repost sweep re-emailed 13 mostly-consulting IBM rows; stored IBM rows
+  # were machine-suppressed the same day. Uncomment to re-enable.
+  # - {name: IBM,              ats: avature,    token: 'ibmglobal|en_US/careers'}
+  # amazon.jobs search API, US-scoped; token is the search query. "co-op"
+  # adds nothing - every Amazon co-op posting is titled "Intern/Co-op"
+  # (probed 2026-08-27), so the intern query already matches them.
+  - {name: Amazon,           ats: amazon,     token: intern}
+  # Netflix self-hosts Eightfold; the shared *.eightfold.ai tenants
+  # (Qualcomm, AMD's icims-lookalike) block EC2 and stay on the feeds.
+  - {name: Netflix,          ats: eightfold,  token: 'explore.jobs.netflix.net|netflix.com|intern'}
+  # Boston Scientific's shared tenant 403s the v2 list ("Not authorized for
+  # PCSX") but serves /api/pcsx/search, which the adapter falls back to;
+  # 33 intern rows from EC2 at add time (2026-09-23). Its Arden Hills AI
+  # Software Development Intern only ever reached LinkedIn before this.
+  - {name: Boston Scientific, ats: eightfold, token: 'bostonscientific.eightfold.ai|bostonscientific.com|intern'}
+  # Adobe's university roles post into the experienced site (292 intern
+  # keyword hits at add time, 2026-08-27).
+  - {name: Adobe,            ats: workday,    token: 'adobe|5|external_experienced'}
+  # PayPal's Workday site is literally named "jobs" (paypal.wd1/en-US/jobs);
+  # its SWE intern and new-grad reqs post there. Added 2026-09-04 after the
+  # user spotted a Software Engineer Intern the crawl had never seen.
+  - {name: PayPal,           ats: workday,    token: 'paypal|1|jobs'}
+  # Bain's Avature portal answers on its vanity domain (no *.avature.net
+  # alias), uses the FolderDetail card template, and server-renders detail
+  # pages, so its rows get descriptions. The intern search returns ~250
+  # fuzzy hits, nearly all non-intern or non-US; the prefilter eats those.
+  # Added 2026-09-04 for the AI Engineering Intern (Summer 2027), NY/SF.
+  - {name: Bain & Company,   ats: avature,    token: 'careers.bain.com|jobs', every_hours: 1}
+  # Big consumer/infra tech on plain Greenhouse boards, none of which the
+  # broad list had picked up. All tokens verified live 2026-08-27.
+  - {name: Datadog,          ats: greenhouse, token: datadog}
+  - {name: Airbnb,           ats: greenhouse, token: airbnb}
+  - {name: Waymo,            ats: greenhouse, token: waymo}
+  - {name: Roblox,           ats: greenhouse, token: roblox}
+  - {name: DoorDash,         ats: greenhouse, token: doordashusa}
+  - {name: Lyft,             ats: greenhouse, token: lyft}
+  - {name: Robinhood,        ats: greenhouse, token: robinhood}
+  - {name: Dropbox,          ats: greenhouse, token: dropbox}
+  - {name: Pinterest,        ats: greenhouse, token: pinterest}
+
+  # --- Big-tech sites with no hosted ATS. The 2026-09-28 audit found every
+  # one of these reaching jobs.db only through the aggregator feeds, hours to
+  # days after the posting went up. Each has its own adapter (docs.md lists
+  # the endpoint each reads); the heavy ones poll on a clock because a poll
+  # is a dozen calls (TikTok: 1,145 US intern rows) or a metered Firecrawl
+  # fetch (Tesla, Citadel: their edges refuse EC2 outright). Names match the
+  # feeds' spellings so the company|title|location hash dedupes across the
+  # two paths; url identity does the rest. ---
+  - {name: Meta,             ats: meta,       token: intern, every_hours: 2}
+  - {name: Apple,            ats: apple,      token: internships-STDNT-INTRN, every_hours: 1}
+  - {name: Microsoft,        ats: eightfold,  token: 'apply.careers.microsoft.com|microsoft.com|intern', every_hours: 1}
+  - {name: Qualcomm,         ats: eightfold,  token: 'careers.qualcomm.com|qualcomm.com|intern', every_hours: 1}
+  - {name: AMD,              ats: jibe,       token: careers.amd.com}
+  - {name: Oracle,           ats: oraclecloud, token: 'eeho.fa.us2.oraclecloud.com|CX_45001', every_hours: 2}
+  - {name: JPMorganChase,    ats: oraclecloud, token: 'jpmc.fa.oraclecloud.com|CX_1001', every_hours: 2}
+  - {name: American Express, ats: oraclecloud, token: 'egug.fa.us2.oraclecloud.com|CX_1', every_hours: 2}
+  - {name: TikTok,           ats: bytedance,  token: tiktok, every_hours: 2}
+  - {name: ByteDance,        ats: bytedance,  token: bytedance, every_hours: 2}
+  - {name: Tesla,            ats: tesla,      token: US, every_hours: 6}
+  - {name: Citadel,          ats: citadel,    token: citadel.com, every_hours: 6}
+  - {name: Citadel Securities, ats: citadel,  token: citadelsecurities.com, every_hours: 6}
+  - {name: Akuna Capital,    ats: greenhouse, token: akunacapital}
+  - {name: Goldman Sachs,    ats: goldman,    token: students, every_hours: 2}
+  # Added 2026-10-11 after an Instagram job-alert account beat the crawl to
+  # Sephora's and Decagon's postings: these firms sat on no tier because
+  # they never appear on the aggregator feeds with a derivable apply URL
+  # (Jump Trading, on the urgent list above, had 33 intern postings open and
+  # no board). SuccessFactors sites (`sapsf`) had no adapter until then.
+  - {name: Sephora,          ats: sapsf,      token: jobs.sephora.com}
+  - {name: NetApp,           ats: sapsf,      token: jobs.netapp.com}
+  - {name: Jump Trading,     ats: greenhouse, token: jumptrading}
+  - {name: Squarepoint Capital, ats: greenhouse, token: squarepointcapital}
+  - {name: MongoDB,          ats: greenhouse, token: mongodb}
+  - {name: Elastic,          ats: greenhouse, token: elastic}
+  - {name: GitLab,           ats: greenhouse, token: gitlab}
+  - {name: Epic Games,       ats: greenhouse, token: epicgames}
+  - {name: Take-Two Interactive, ats: greenhouse, token: taketwo}
+  - {name: Reddit,           ats: greenhouse, token: reddit}
+  - {name: Toast,            ats: greenhouse, token: toast}
+
+  # --- Frontier labs / applied AI ---
+  - {name: Anthropic,        ats: greenhouse, token: anthropic}
+  - {name: OpenAI,           ats: ashby,      token: openai}
+  - {name: Scale AI,         ats: greenhouse, token: scaleai}
+  - {name: Perplexity,       ats: ashby,      token: perplexity}
+  - {name: Cursor,           ats: ashby,      token: cursor}
+  # Whatnot disabled Ashby's posting API (adapter falls back to scraping the
+  # hosted page); promoted out of the cold tier 2026-09-01 after their live
+  # SWE intern posting sat invisible there.
+  - {name: Whatnot,          ats: ashby,      token: whatnot}
+  - {name: Sierra,           ats: ashby,      token: sierra}
+  - {name: Harvey,           ats: ashby,      token: harvey}
+  - {name: Cohere,           ats: ashby,      token: cohere}
+  - {name: Runway,           ats: ashby,      token: runway-ml}
+  - {name: ElevenLabs,       ats: ashby,      token: elevenlabs}
+
+  # --- SF/Bay Area frontier labs & AI-native (added 2026-07-28 after the SF
+  # trip; every token below verified live that day). Many of these don't post
+  # intern roles yet - with ETag revalidation an empty board costs nothing to
+  # watch, and the whole point is being first when they do. ---
+  # Ashby slug is one word; thinking-machines 404s (fixed 2026-08-12).
+  - {name: Thinking Machines, ats: ashby,     token: thinkingmachines}
+  - {name: xAI,              ats: greenhouse, token: xai}
+  - {name: Cognition,        ats: ashby,      token: cognition}
+  - {name: Poolside,         ats: ashby,      token: poolside}
+  - {name: Magic,            ats: ashby,      token: magic.dev}
+  - {name: Reflection AI,    ats: ashby,      token: reflectionai}
+  - {name: Character.AI,     ats: ashby,      token: character}
+  # Nous Research left Ashby around 2026-09-03 (API 404, board page empty);
+  # roles are now plain pages under nousresearch.com/careers, no ATS behind
+  # them, so only a scrape could read it. No intern roles listed at removal.
+  # - {name: Nous Research,    ats: firecrawl,  token: "https://nousresearch.com/careers/"}
+  - {name: World Labs,       ats: greenhouse, token: worldlabs}
+  - {name: Imbue,            ats: greenhouse, token: imbue}
+  - {name: Goodfire,         ats: greenhouse, token: goodfire}
+  - {name: Letta,            ats: ashby,      token: letta}
+  # Gem-hosted and custom pages: firecrawl only.
+  # Gem board, polled free via the public GraphQL API (was a firecrawl scrape).
+  - {name: Inception Labs,   ats: gem,        token: inception}
+  # Mistral is an Ashby board behind a custom domain - the old firecrawl entry
+  # pointed at jobs.mistral.ai, which does not resolve, and had returned zero
+  # postings 7 runs straight while still costing a scrape each time.
+  - {name: Mistral AI,       ats: ashby,      token: mistral.ai}
+
+  # --- SF AI-native products / infra (same sweep) ---
+  - {name: Suno,             ats: ashby,      token: suno}
+  - {name: Cartesia,         ats: ashby,      token: cartesia}
+  - {name: Sesame,           ats: ashby,      token: sesame}
+  - {name: Ideogram,         ats: ashby,      token: ideogram}
+  - {name: Krea,             ats: ashby,      token: krea}
+  - {name: HeyGen,           ats: greenhouse, token: heygen}
+  - {name: Descript,         ats: greenhouse, token: descript}
+  - {name: Writer,           ats: ashby,      token: writer}
+  - {name: Glean,            ats: greenhouse, token: gleanwork}
+  - {name: Hebbia,           ats: ashby,      token: hebbia-ai}
+  - {name: Exa,              ats: ashby,      token: exa}
+  - {name: Browserbase,      ats: ashby,      token: browserbase}
+  - {name: LiveKit,          ats: ashby,      token: livekit}
+  - {name: AssemblyAI,       ats: greenhouse, token: assemblyai}
+  - {name: OpenRouter,       ats: ashby,      token: openrouter}
+  - {name: LlamaIndex,       ats: ashby,      token: llamaindex}
+  - {name: Braintrust,       ats: ashby,      token: braintrust}
+  - {name: Arize AI,         ats: greenhouse, token: arizeai}
+  - {name: Granola,          ats: ashby,      token: granola}
+  - {name: Factory,          ats: ashby,      token: factory}
+  - {name: Sourcegraph,      ats: greenhouse, token: sourcegraph91}
+
+  # --- AI silicon (kernel/perf roles fit the CUDA track; hardware-only
+  # titles die in the prefilter anyway) ---
+  - {name: Tenstorrent,      ats: greenhouse, token: tenstorrent}
+  # Separate university-hiring board; the name-match rule in `boards` skips
+  # derived variants of curated companies, so it must be curated explicitly.
+  - {name: Tenstorrent University, ats: greenhouse, token: tenstorrentuniversity}
+  - {name: MatX,             ats: ashby,      token: matx}
+  - {name: d-Matrix,         ats: ashby,      token: d-matrix}
+
+  # --- AI infra / inference / vector (closest to your GraphRAG + CUDA work) ---
+  - {name: Databricks,       ats: greenhouse, token: databricks}
+  - {name: Together AI,      ats: greenhouse, token: togetherai}
+  - {name: Modal,            ats: ashby,      token: modal}
+  - {name: Baseten,          ats: ashby,      token: baseten}
+  # W&B was acquired by CoreWeave; its board folded into the CoreWeave one.
+  - {name: CoreWeave (W&B),  ats: greenhouse, token: coreweave}
+  - {name: LangChain,        ats: ashby,      token: langchain}
+  - {name: Pinecone,         ats: ashby,      token: pinecone}
+  - {name: Chroma,           ats: ashby,      token: trychroma}
+  - {name: Hugging Face,     ats: workable,   token: huggingface}
+
+  # --- Systems / GPU / performance (the CUDA kernel angle) ---
+  - {name: NVIDIA,           ats: workday,    token: "nvidia|5|NVIDIAExternalCareerSite"}
+  # Promoted from the cold tier 2026-08-27 after it re-opened its whole
+  # intern batch (SDE/SW Architecture/Algorithm) as fresh requisitions.
+  # Token kept byte-identical to the cold entry so the include-merge dedupes
+  # it and the boards-table health history carries over.
+  - {name: Ambarella,        ats: workday,    token: 'ambarella|108|ambarella'}
+  # Toyota Motor North America. careers.toyota.com is a Phenom front over
+  # Workday (apply URLs land on toyota.wd503/TMNA; verified live
+  # 2026-08-28). TRI and Woven are separate Lever boards already in the
+  # broad/cold tiers - this is the corporate board where the Plano software
+  # internships post.
+  - {name: Toyota,           ats: workday,    token: 'toyota|503|TMNA'}
+  - {name: Cerebras,         ats: ashby,      token: cerebras}
+  - {name: SambaNova,        ats: greenhouse, token: sambanovasystems}
+  # Gem board polled via its public GraphQL API (free, hourly) - the page
+  # itself is a client-rendered shell that firecrawl saw as empty. The board
+  # resolves but listed zero public postings as of 2026-08-12; watching it
+  # costs nothing.
+  - {name: Groq,             ats: gem,        token: groq}
+  # Renamed from Atomic Semi; old ashby slugs (atomicsemi/AtomicSemi) 404 but
+  # the public lists still link them, so the curated entry owns the company.
+  - {name: Atomic Semi,      ats: ashby,      token: fab2}
+  # Lever EU region board; the eu: prefix routes fetch_lever to api.eu.lever.co.
+  - {name: Cirrus Logic,     ats: lever,      token: "eu:cirrus"}
+
+  # --- Product cos with strong infra orgs ---
+  - {name: Ramp,             ats: ashby,      token: ramp}
+  - {name: Figma,            ats: greenhouse, token: figma}
+  - {name: Notion,           ats: ashby,      token: notion}
+  - {name: Linear,           ats: ashby,      token: linear}
+  - {name: Vercel,           ats: greenhouse, token: vercel}
+  - {name: Stripe,           ats: greenhouse, token: stripe}
+  - {name: Plaid,            ats: ashby,      token: plaid}
+  - {name: Nominal,          ats: gem,        token: nominal}   # hardware test-data startup; SWE intern (summer 2027) posted 2026-09-10, missed until added 2026-09-11
+  - {name: Discord,          ats: greenhouse, token: discord}
+  - {name: Instacart,        ats: greenhouse, token: instacart}
+  - {name: Coinbase,         ats: greenhouse, token: coinbase}
+
+  # --- YC companies you already hold Startup School credits with ---
+  # You have an account, usage history, and often a support channel at each of
+  # these, which is a real referral hook a cold application does not have.
+  - {name: Deepgram,         ats: ashby,      token: deepgram}
+  - {name: Supabase,         ats: ashby,      token: supabase}
+  - {name: Fireworks AI,     ats: ashby,      token: fireworks}
+  - {name: Sarvam AI,        ats: ashby,      token: sarvam}
+  - {name: Vapi,             ats: ashby,      token: vapi}
+  - {name: Roboflow,         ats: ashby,      token: roboflow}
+  - {name: Tavus,            ats: ashby,      token: tavus}
+  - {name: Firecrawl,        ats: ashby,      token: firecrawl}
+  - {name: Langfuse,         ats: ashby,      token: langfuse}
+  - {name: Gumloop,          ats: ashby,      token: gumloop}
+  - {name: Greptile,         ats: ashby,      token: greptile}
+  - {name: AgentMail,        ats: ashby,      token: agentmail}
+  - {name: Blaxel,           ats: ashby,      token: blaxel}
+  - {name: Bolna AI,         ats: ashby,      token: bolna}
+
+  # --- Other YC / adjacent startups matching the agent + infra track ---
+  # Zipline runs Greenhouse behind www.zipline.com vanity apply URLs, which
+  # never derive to a board - its many SWE intern postings only reached us as
+  # NULL-score simplify list rows. Token flyzipline verified live 2026-08-27.
+  - {name: Zipline,          ats: greenhouse, token: flyzipline}
+  - {name: Replit,           ats: ashby,      token: replit}
+  - {name: Rilla,            ats: ashby,      token: rilla}   # NYC; SWE intern 2027 + design intern, 2026-09-02
+  - {name: Decagon,          ats: ashby,      token: decagon}
+  - {name: Mercor,           ats: ashby,      token: mercor}
+  - {name: Lovable,          ats: ashby,      token: lovable}
+  - {name: Mintlify,         ats: ashby,      token: mintlify}
+  - {name: E2B,              ats: ashby,      token: e2b}
+  # Relari (YC W24, dexterous robots) hires only through YC's Work at a
+  # Startup page - no ATS board anywhere (user-reported LinkedIn alert,
+  # 2026-08-31). First board on the yc adapter.
+  - {name: Relari,           ats: yc,         token: relari}
+  # User-reported miss 2026-09-01: SWE intern posting only on their WaaS page
+  # (the YC-wide firecrawl sweep is paused, so YC-only companies need a board
+  # here to be seen at all).
+  - {name: Aviator,          ats: yc,         token: aviator}
+  # iHerb left Greenhouse (token 404s since 2026-08-06; the cold tier keeps
+  # probing the corpse). Their live board is Workday, verified 2026-08-31.
+  # Daily clock: replaces a cold-tier slot, must not add to the hourly
+  # workday queue that was crowding the run timer.
+  - {name: iHerb,            ats: workday,    token: 'iherb|5|Careers', every_hours: 24}
+  - {name: Resend,           ats: ashby,      token: resend}
+  - {name: Warp,             ats: ashby,      token: warp}
+  - {name: Zed,              ats: ashby,      token: zed}
+  - {name: Neon,             ats: lever,      token: neon}
+  - {name: Hex,              ats: greenhouse, token: hextechnologies}
+
+  # The YC-wide board. Unauthenticated it exposes only a sample of listings, so
+  # treat this as a supplement to the per-company boards above, not a substitute.
+  # PAUSED 2026-08-25 (burning ~100 credits/day on JSON-format scrapes;
+  # re-enable after switching to markdown scrapes + own-LLM extraction):
+  # {name: Work at a Startup, ats: firecrawl, token: "https://www.workatastartup.com/jobs"}
+
+  # --- Big tech with custom careers stacks ---
+  # Google killed its public careers API; this scrapes the server-rendered
+  # search page. Their intern postings close within DAYS (the Summer 2027 SWE
+  # intern posting lived 2026-07-20 to ~07-24), so hourly polling is the only
+  # way to be in the first wave.
+  - {name: Google,           ats: google,     token: intern}
+  # Atlassian's own careers site, fed by a JSON endpoint with descriptions
+  # inline. Its iCIMS portals underneath (careers-americas etc.) are shells
+  # that redirect to atlassian.com, so the icims adapter saw nothing there
+  # while the feeds listed the 2027 SWE intern (2026-09-02).
+  - {name: Atlassian,        ats: atlassian,  token: listings}
+
+  # --- Gaps found by auditing dreamworkhq/Tech-Internships-2027 (2026-08-20).
+  # Each token resolved from the posting's real apply URL and verified live.
+  # The dreamwork list itself is NOT a feed: its links point at
+  # dreamworkhq.com redirect pages, so neither URL nor hash identity could
+  # ever collide with our direct fetches and every shared posting would
+  # double-list. Polling the boards directly captures the value without that.
+  - {name: Arista Networks,  ats: smartrecruiters, token: AristaNetworks}
+  - {name: Garda Capital,    ats: greenhouse, token: gardacp}
+  - {name: Aechelon Technology, ats: greenhouse, token: aechelontechnology}
+  - {name: Tenex,            ats: ashby,      token: tenex}
+  - {name: Notable,          ats: ashby,      token: notable}
+  - {name: Allium,           ats: ashby,      token: allium}
+  - {name: Deductive AI,     ats: ashby,      token: deductive}
+  - {name: Drivetrain,       ats: lever,      token: drivetrain}
+  - {name: Layup Parts,      ats: lever,      token: layup}
+  - {name: WebFX,            ats: lever,      token: webfx}
+  - {name: Athena,           ats: workday,    token: 'athenago|108|athena'}
+  - {name: KION Group,       ats: workday,    token: 'kiongroup|3|KION_SCS'}
+
+  # --- Aggregated safety nets ---
+  # SimplifyJobs' machine-readable feed (updates every 30 min). Covers the
+  # hosts we cannot poll directly. As of 2026-08-27 that means (all probed
+  # from the VM, where the crawl runs): Microsoft (gcsservices API refuses
+  # EC2 connections), Tesla (Akamai 403), Meta (400), TikTok (302 wall),
+  # Apple (the jobs.apple.com JSON APIs are gone; the page is client-
+  # rendered), Bloomberg (Avature tenant with different HTML than IBM's),
+  # Qualcomm/AMD (Eightfold/other behind bot walls), Snowflake, LinkedIn.
+  # Oracle-HCM tenants (Oracle itself, JPMC) answer from EC2 but need
+  # per-tenant siteNumber discovery and their keyword finder returned 0
+  # rows on first probe - a future oraclecloud adapter is the opening.
+  # Listings on boards we DO poll directly are dropped at run time, so the
+  # faster direct fetch always wins.
+  # The Summer2026 repo was renamed to Summer2027; the old URL redirects to
+  # the same listings.json, and feeds_discovered.yaml had independently vetted
+  # the new URL - so the identical 14k-row feed was fetched twice per run.
+  # Pointing the curated entry at the canonical URL makes the include-merge
+  # dedupe them (same ats+token, curated wins).
+  - {name: Simplify feed,    ats: simplify,   token: "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json"}
+  # Hand-curated Summer 2027 list - a human spots postings no ATS sweep can
+  # (it carried the Google SWE intern posting the Simplify feed had already
+  # marked inactive). Same covered-board dropping applies.
+  - {name: sndsh404 list,    ats: sndsh404,   token: "https://raw.githubusercontent.com/sndsh404/summer-2027-internships/main/README.md"}
+  # The big community 2027 list (vanshb03, 8k+ stars, updated daily) runs the
+  # same listings.json machinery as Simplify - the adapter works unchanged.
+  # 2027-focused, so it is often first on next-cycle postings.
+  - {name: Vansh 2027 feed,  ats: simplify,   token: "https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json"}
+
+  # --- Quant (your math degree + systems work reads well here) ---
+  # All four run custom career sites with no public JSON, so these are the only
+  # entries that spend Firecrawl credits. Jane Street keeps a Greenhouse board
+  # for full-time roles but posts internships exclusively on its own site, so it
+  # needs both entries.
+  # Susquehanna runs on iCIMS - a top quant target, and its cards carry full
+  # descriptions inline, so these arrive pre-enriched.
+  - {name: Susquehanna,      ats: icims,      token: careers-sig}
+  - {name: Jane Street,      ats: greenhouse, token: janestreet}
+  # {name: Jane Street (intern), ats: firecrawl, token: "https://www.janestreet.com/join-jane-street/open-roles/?type=internship"}
+  # HRT keeps a small free Greenhouse board alongside its custom page; poll the
+  # free one hourly and let the scrape (which sees more roles) run on the slow
+  # firecrawl cadence.
+  - {name: Hudson River (GH), ats: greenhouse, token: hrttalentcommunity}
+  # {name: Hudson River,     ats: firecrawl,  token: "https://www.hudsonrivertrading.com/careers/"}
+  # {name: Citadel,          ats: firecrawl,  token: "https://www.citadel.com/careers/open-opportunities/"}
+  # Two Sigma runs Avature (twosigma.avature.net, vanity careers.twosigma.com).
+  # The portal has no SearchJobs page - the adapter falls back to its
+  # OpenRoles/intern keyword search (~13 hits) - and server-renders detail
+  # pages, so its rows get descriptions. Replaces the paused firecrawl scrape;
+  # added 2026-09-08 for the Software Engineering Internship (Summer 2027)
+  # the crawl had never seen.
+  - {name: Two Sigma,        ats: avature,    token: 'twosigma|careers'}
+  # Greenhouse behind the quantbot.com vanity domain (the gh_jid= in their
+  # apply URLs gives it away). Direct polling gets scored, described rows
+  # instead of the unscored aggregator pass-throughs that found them first.
+  - {name: Quantbot Technologies, ats: greenhouse, token: quantbot-technologies}
+
+  # --- 2026-08-24: 56 boards mined from the user's Simplify/Handshake
+  # application export (boards applied to by hand that nothing polled).
+  # Tokens live-verified at add time. ---
+  - {name: 84.51 Degrees, ats: greenhouse, token: 8451university}
+  - {name: a37, ats: ashby, token: a37}
+  - {name: Ada, ats: greenhouse, token: ada18}
+  - {name: Amplitude, ats: greenhouse, token: amplitude}
+  - {name: Armada, ats: greenhouse, token: armada}
+  - {name: Atlan, ats: ashby, token: atlan}
+  - {name: ATPCO, ats: smartrecruiters, token: ATPCO1}
+  - {name: Audax Group, ats: greenhouse, token: audaxgroup}
+  - {name: Bits, ats: workable, token: getbits}
+  - {name: Clera, ats: ashby, token: clera}
+  - {name: Clockwork Systems, ats: greenhouse, token: clockworksystems}
+  - {name: Cluely, ats: ashby, token: cluely}
+  - {name: Confluent, ats: ashby, token: confluent}
+  - {name: Datasite, ats: workday, token: 'datasite|1|datasite'}
+  - {name: Ditto, ats: ashby, token: ditto}
+  - {name: Exowatt, ats: lever, token: exowatt}
+  - {name: Fable Security, ats: ashby, token: fable}
+  - {name: Fidelity Investments, ats: workday, token: 'fmr|1|targeted'}
+  - {name: Fizz, ats: ashby, token: fizz}
+  - {name: GoFundMe, ats: greenhouse, token: gofundme}
+  - {name: ING, ats: workday, token: 'ing|3|icsgblcor'}
+  - {name: Button, ats: rippling, token: button}
+  - {name: Journey Clinical, ats: lever, token: JourneyClinical}
+  - {name: Klaviyo, ats: greenhouse, token: klaviyocampus}
+  - {name: Lightspark, ats: ashby, token: lightspark}
+  - {name: Mercedes-Benz, ats: lever, token: MBRDNA}
+  - {name: Method Financial, ats: ashby, token: method}
+  - {name: Monogram, ats: ashby, token: monogram}
+  - {name: N1, ats: ashby, token: n1}
+  - {name: NimbleRx, ats: lever, token: nimblerx}
+  - {name: Nomagic, ats: lever, token: Nomagic}
+  - {name: Numeric, ats: ashby, token: numeric}
+  - {name: Outmarket AI, ats: ashby, token: outmarket}
+  - {name: Phoebe, ats: ashby, token: phoebe-work}
+  - {name: PricewaterhouseCoopers (PwC), ats: workday, token: 'pwc|3|US_Entry_Level_Careers'}
+  - {name: QuantCo, ats: lever, token: quantco-}
+  - {name: Rise8, ats: greenhouse, token: rise8}
+  - {name: Riveron, ats: ashby, token: riveron}
+  - {name: ServiceNow, ats: smartrecruiters, token: ServiceNow}
+  - {name: SignalFire, ats: ashby, token: SignalFire}
+  - {name: State of Wisconsin Investment Board, ats: workday, token: 'swib|12|ext'}
+  - {name: State Street, ats: workday, token: 'statestreet|1|Global'}
+  - {name: The New York Times, ats: greenhouse, token: thenewyorktimes}
+  - {name: Tinder, ats: lever, token: matchgroup}
+  - {name: Toshiba Global Commerce, ats: greenhouse, token: toshibaglobalcommercesolutions}
+  - {name: Traackr, ats: lever, token: traackr}
+  - {name: Origami Risk, ats: icims, token: directapply-origamirisk}
+  - {name: AI Fund, ats: lever, token: AIFund}
+  - {name: Veeva Systems, ats: lever, token: veeva}
+  - {name: Verkada, ats: greenhouse, token: verkada}
+  - {name: Verse, ats: greenhouse, token: verse}
+  - {name: Weave, ats: ashby, token: weave}
+  - {name: Western Magnetics, ats: workable, token: western-magnetics}
+  - {name: WorldQuant, ats: greenhouse, token: worldquant}
+  - {name: Wurl, ats: greenhouse, token: wurljobs}
+  - {name: Xometry, ats: greenhouse, token: xometry}
+  # CMU moved Workday instances (wd5 -> wd115) in Aug 2026; the broad tier's
+  # derived wd5 token 422s forever. Verified live 2026-08-25, 169 postings.
+  - {name: Carnegie Mellon University, ats: workday, token: 'cmu|115|CMU'}

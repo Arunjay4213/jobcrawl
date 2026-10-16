@@ -1,0 +1,12 @@
+[Unit]
+Description=jobcrawl minute-level board watch tick
+Wants=network-online.target
+After=network-online.target
+# No OnFailure on purpose: cli watch exits 0 and alerts on its own cadence.
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/jobcrawl
+ExecStart=/home/ubuntu/bin/jobcrawl-watch.sh
+TimeoutStartSec=50s

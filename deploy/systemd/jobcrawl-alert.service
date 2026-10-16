@@ -1,0 +1,6 @@
+[Unit]
+Description=email alert when a jobcrawl run fails
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/bin/jobcrawl-alert.sh

@@ -1,0 +1,6 @@
+[Unit]
+Description=email alert when the jobcrawl daily audit fails
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/bin/jobcrawl-alert.sh jobcrawl-audit.service

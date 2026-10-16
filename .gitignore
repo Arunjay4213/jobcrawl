@@ -1,0 +1,19 @@
+# Secrets. Never commit these.
+.env
+jobcrawl/.env
+
+jobs.db
+# Store's single-writer flock sidecar; local coordination state, never committed
+# (jobs.db itself IS committed, via git add -f).
+*.db.lock
+# `watch` tick state (ETags + seen URLs); local to the box that runs the timer.
+watch_state.json
+watch_state.json.tmp
+digests/
+run.log*
+__pycache__/
+*.pyc
+resolve_cache.json.tmp
+# Claude Code worktrees and local settings
+.claude/worktrees/
+.claude/settings.local.json

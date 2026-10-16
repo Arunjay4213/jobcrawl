@@ -1,0 +1,11 @@
+[Unit]
+OnFailure=jobcrawl-alert.service
+Description=jobcrawl pipeline run
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/jobcrawl
+ExecStart=/home/ubuntu/bin/jobcrawl-run.sh
+TimeoutStartSec=25min

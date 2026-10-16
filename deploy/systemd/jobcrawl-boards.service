@@ -1,0 +1,6 @@
+[Unit]
+Description=jobcrawl weekly board-tier regeneration
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/bin/jobcrawl-boards.sh

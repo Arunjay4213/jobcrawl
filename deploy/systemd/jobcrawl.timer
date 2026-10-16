@@ -1,0 +1,8 @@
+[Unit]
+Description=jobcrawl every 12 minutes
+[Timer]
+OnCalendar=*-*-* *:00/12:00
+RandomizedDelaySec=20
+Persistent=true
+[Install]
+WantedBy=timers.target

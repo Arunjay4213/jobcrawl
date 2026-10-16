@@ -1,0 +1,5 @@
+# Auto-discovered aggregator feeds (`jobcrawl feeds --add`).
+# Vetted: readable listings.json, 50+ stars, 20+ active listings.
+# Remove an entry here and it will be re-added; blacklist in config.yaml instead.
+companies:
+  - {name: SimplifyJobs feed, ats: simplify, token: 'https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json'}

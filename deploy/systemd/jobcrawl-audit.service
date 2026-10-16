@@ -1,0 +1,11 @@
+[Unit]
+Description=jobcrawl daily scorer audit
+OnFailure=jobcrawl-audit-alert.service
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/jobcrawl
+ExecStart=/home/ubuntu/bin/jobcrawl-audit.sh
+TimeoutStartSec=45min

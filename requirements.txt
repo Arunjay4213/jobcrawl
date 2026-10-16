@@ -1,0 +1,4 @@
+requests>=2.31
+PyYAML>=6.0
+# Browser TLS fingerprint for hosts that refuse plain clients (metacareers.com).
+curl_cffi>=0.7
