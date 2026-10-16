@@ -24,17 +24,21 @@ Numbers from its database on 2026-10-16:
 ATS JSON APIs  ->  regex prefilter  ->  LLM scoring  ->  SQLite dedupe  ->  email digest + tracker
 ```
 
-- **Fetching.** Most ATSs serve public, unauthenticated JSON endpoints, so about 90% of boards need no scraping at all.
-  Workday needs a POST but is equally open.
-  Requests are throttled per host, and boards that fail repeatedly drop to a slower retry clock instead of being hammered.
-- **Board tiers.** Hand-curated boards are polled every run.
-  Further boards are found automatically from public internship lists, YC's directory, VC portfolio pages, and companies' own websites.
-  A cold tier of thousands of boards that hired last cycle is checked a fixed number per run, least recently tried first, so it spreads itself out instead of arriving all at once.
-- **Dedupe and lifecycle.** Postings are keyed by content hash and normalized URL, which catches the same job reposted under a new ID.
-  A posting that stays missing from its board for several runs is marked closed.
-- **Scoring.** An LLM rates each surviving posting from 0 to 100 against `profile.md`.
-  Postings you mark as applied or skipped are fed back to the scorer as calibration examples, and a stronger model audits the previous day's scores each morning.
-- **Watch list.** A separate timer checks a short list of priority boards every minute and emails new intern titles at once.
+Most ATSs serve public, unauthenticated JSON endpoints, so about 90% of boards need no scraping at all.
+Workday needs a POST but is just as open.
+Requests are throttled per host, and a board that keeps failing moves to a slower retry clock instead of being hammered.
+
+Hand-curated boards are polled on every run.
+More boards are discovered automatically from public internship lists, YC's directory, VC portfolio pages, and companies' own websites.
+A cold tier of thousands of boards that hired last cycle is checked a fixed number at a time per run, least recently tried first, so the load is spread out instead of arriving all at once.
+
+Postings are keyed by content hash and by normalized URL, which catches the same job reposted under a new ID.
+A posting that stays missing from its board for several runs is marked closed.
+
+An LLM rates each surviving posting from 0 to 100 against `profile.md`.
+Postings you mark as applied or skipped go back to the scorer as calibration examples, and each morning a stronger model audits the previous day's scores.
+
+A separate watch-list timer checks a short list of priority boards every minute and emails new intern titles right away.
 
 [`docs.md`](docs.md) has the full design: board tiers, the posting lifecycle, politeness rules, tuning, and cost.
 
