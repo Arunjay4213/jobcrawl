@@ -11,7 +11,7 @@ I run it for my own internship search on a small Linux VM under systemd timers.
 Numbers from its database on 2026-10-16:
 
 - Running unattended since 2026-07-28: 80 days and 7,358 crawl runs.
-- 5,894 career boards tracked across 29 applicant tracking systems.
+- 5,894 career boards tracked: 14 applicant tracking systems, plus custom company APIs (Google, Amazon, Apple, Meta, and others) and public listing feeds.
   The largest are Workday (1,807 boards), Greenhouse (1,189), Ashby (833), iCIMS (394), and Lever (390).
 - About 5,400 boards fetched successfully in a typical day.
 - About 872 million postings fetched in total, about 118,000 per run on average, with a peak of 194,000 in one run.
